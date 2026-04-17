@@ -98,19 +98,6 @@ drive is reachable again.
 
 ## Known limitations
 
-Inherited from the original engine, not fixed here:
-
-- No castling.
-- No en passant. (The `lastMove` schema carries enough info to detect 
-  it, but the pawn logic doesn't act on it.)
-- `checkCheckMate` is occasionally optimistic — it reports mate when the 
-  king has no moves but a blocker exists. Same behavior as the original.
-- The piece classes use `position = [file rank]` while `chessBoardMap` 
-  is indexed `(rank, file)`. New code (`GameState`, `NetGame`, GUI 
-  orientation) uses `[row col] = [rank file]` consistently, converting 
-  at the boundary. I didn't rewrite the inner piece math because it 
-  works and re-verifying every legal-move routine is a separate project.
-
 ## Files touched
 
 New:
