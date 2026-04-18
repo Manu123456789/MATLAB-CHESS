@@ -26,6 +26,11 @@ classdef ChessBoardGUI < handle
         statusText
         refreshButton
         pauseButton
+        endTurnButton
+        undoButton
+        premoveButton
+        clearPremovesButton
+        cancelPremoveButton
         timerWhiteText
         timerBlackText
         moveTimerObj             = []
@@ -37,6 +42,10 @@ classdef ChessBoardGUI < handle
         selectedRank             = []     % 1..8 or []
         selectedOrigBg           = []     % background color before selection
         highlightSnapshot        = {}     % cell array of snapshot structs
+        pendingMove              = []
+        premoveQueue             = struct('oppFrom', {}, 'oppTo', {}, 'myFrom', {}, 'myTo', {})
+        premoveEntry             = []
+        premoveHighlightSnapshot = {}
 
         % Cached dot image (generated once) ------------------------------
         dotCData
@@ -49,6 +58,10 @@ classdef ChessBoardGUI < handle
         COLOR_SELECTED   = [1 1 0.4]      % selected piece background (pale yellow)
         COLOR_CAPTURE    = [1 0.72 0.72]  % capture target background (pale red)
         COLOR_LASTMOVE   = [0.76 0.9 0.6] % from/to flash after opponent moves
+        COLOR_PENDING    = [1.0 0.88 0.45]
+        COLOR_PREMOVE_OPP = [1.0 0.82 0.55]
+        COLOR_PREMOVE_ME  = [0.75 0.86 1.0]
+        COLOR_PREMOVE_ENTRY = [0.92 0.82 1.0]
         TILE_PX          = 100
         BOARD_ORIGIN_X   = 20
         BOARD_ORIGIN_Y   = 40
@@ -95,23 +108,43 @@ classdef ChessBoardGUI < handle
             this.statusText = uicontrol(h, 'Style','text', 'String','', ...
                 'FontSize',14, 'HorizontalAlignment','left', ...
                 'BackgroundColor',[1 1 1], ...
-                'Position',[this.BOARD_ORIGIN_X topBarY 600 30]);
+                'Position',[this.BOARD_ORIGIN_X topBarY 490 30]);
+            this.timerWhiteText = uicontrol(h, 'Style','text', 'String','White  --:--', ...
+                'FontSize',12, 'HorizontalAlignment','right', ...
+                'BackgroundColor',[1 1 1], 'Position',[510 topBarY 110 30]);
+            this.timerBlackText = uicontrol(h, 'Style','text', 'String','Black  --:--', ...
+                'FontSize',12, 'HorizontalAlignment','right', ...
+                'BackgroundColor',[1 1 1], 'Position',[625 topBarY 110 30]);
+            this.endTurnButton = uicontrol(h, 'Style','pushbutton', ...
+                'String','End Turn', 'FontSize',11, ...
+                'Position',[740 topBarY 85 30], ...
+                'Visible','off', 'Callback', @(~,~) this.commitPendingMove());
+            this.undoButton = uicontrol(h, 'Style','pushbutton', ...
+                'String','Undo', 'FontSize',11, ...
+                'Position',[830 topBarY 60 30], ...
+                'Visible','off', 'Callback', @(~,~) this.undoPendingMove());
+            this.premoveButton = uicontrol(h, 'Style','pushbutton', ...
+                'String','Premove', 'FontSize',11, ...
+                'Position',[740 topBarY 85 30], ...
+                'Visible','off', 'Callback', @(~,~) this.onAddPremoveClicked());
+            this.clearPremovesButton = uicontrol(h, 'Style','pushbutton', ...
+                'String','Clear Pre', 'FontSize',11, ...
+                'Position',[830 topBarY 70 30], ...
+                'Visible','off', 'Callback', @(~,~) this.onClearPremovesClicked());
+            this.cancelPremoveButton = uicontrol(h, 'Style','pushbutton', ...
+                'String','Cancel', 'FontSize',11, ...
+                'Position',[905 topBarY 60 30], ...
+                'Visible','off', 'Callback', @(~,~) this.onCancelPremoveClicked());
             this.refreshButton = uicontrol(h, 'Style','pushbutton', ...
-                'String','Refresh', 'FontSize',12, ...
-                'Position',[875 topBarY 70 30], ...
+                'String','Refresh', 'FontSize',11, ...
+                'Position',[905 topBarY 60 30], ...
                 'Enable',   this.refreshEnableFlag(), ...
                 'Callback', @(~,~) this.onRefreshClicked());
             this.pauseButton = uicontrol(h, 'Style','pushbutton', ...
-                'String','Pause', 'FontSize',12, ...
-                'Position',[950 topBarY 70 30], ...
+                'String','Pause', 'FontSize',11, ...
+                'Position',[970 topBarY 55 30], ...
                 'Enable','off', ...
                 'Callback', @(~,~) this.onPauseResumeClicked());
-            this.timerWhiteText = uicontrol(h, 'Style','text', 'String','White  --:--', ...
-                'FontSize',12, 'HorizontalAlignment','right', ...
-                'BackgroundColor',[1 1 1], 'Position',[610 topBarY 125 30]);
-            this.timerBlackText = uicontrol(h, 'Style','text', 'String','Black  --:--', ...
-                'FontSize',12, 'HorizontalAlignment','right', ...
-                'BackgroundColor',[1 1 1], 'Position',[740 topBarY 125 30]);
 
             Letters = 'ABCDEFGH';
             for file = 1:8
@@ -179,10 +212,15 @@ classdef ChessBoardGUI < handle
         % ---------------------------------------------------------------
         function onSquareClicked(this, btn, ~, file, rank)
             if this.suppressInput; return; end
-            if ~isempty(this.netGame) && ~this.netGame.isMyTurn(); return; end
             if ~strcmp(this.gameController.gameStatus(), 'active'); return; end
             if this.isClockExpired(); return; end
             if this.isGamePaused(); return; end
+            if ~isempty(this.pendingMove); return; end
+            if ~isempty(this.premoveEntry)
+                this.handlePremoveEntryClick(btn, file, rank);
+                return;
+            end
+            if ~isempty(this.netGame) && ~this.netGame.isMyTurn(); return; end
 
             piece    = btn.UserData;
             hasPiece = ~isempty(piece) && ~ischar(piece);
@@ -308,9 +346,6 @@ classdef ChessBoardGUI < handle
             if castleInfo.isCastle
                 this.applyCastleRookMove(castleInfo);
             end
-            if movedPiece.id == 'P' && this.gameController.checkPromotion(movedPiece)
-                this.promote(movedPiece);
-            end
 
             % Would this move leave our king in check? Roll back if so.
             if movedPiece.id ~= 'K' && ~this.gameController.checkNoCoverCheck(movedPiece.color)
@@ -321,14 +356,46 @@ classdef ChessBoardGUI < handle
             end
 
             this.chessBoardModel.enPassantInfo = this.computeNextEnPassantInfo(srcPiece, srcFile, srcRank, dstFile, dstRank);
-            nextTimerState = this.timerStateAfterCompletedMove(prevTimerState, srcPiece.color);
+            this.pendingMove = struct( ...
+                'srcFile', srcFile, 'srcRank', srcRank, ...
+                'dstFile', dstFile, 'dstRank', dstRank, ...
+                'movedPiece', movedPiece, ...
+                'dstPieceBefore', dstPieceBefore, ...
+                'srcPictureBefore', srcPictureBefore, ...
+                'dstPictureBefore', dstPictureBefore, ...
+                'castleInfo', castleInfo, ...
+                'enPassantInfo', enPassantInfo, ...
+                'prevEnPassantInfo', prevEnPassantInfo, ...
+                'srcPieceUsedBefore', srcPieceUsedBefore, ...
+                'prevTimerState', prevTimerState, ...
+                'prevStateSnapshot', prevStateSnapshot, ...
+                'wasCapture', wasCapture);
+            this.tintPendingMove();
+            this.updateStatusBar();
+            this.updateActionButtons();
+
+            if movedPiece.id == 'P' && this.gameController.checkPromotion(movedPiece)
+                this.promote(movedPiece);
+                if ~isempty(this.pendingMove)
+                    this.commitPendingMove();
+                end
+            end
+        end
+
+        function commitPendingMove(this)
+            if isempty(this.pendingMove)
+                this.updateActionButtons();
+                return;
+            end
+            pm = this.pendingMove;
+            prevTimerState = pm.prevTimerState;
+            nextTimerState = this.timerStateAfterCompletedMove(prevTimerState, pm.movedPiece.color);
             this.stopMoveTimer();
             this.applyTimerStateToCurrentContext(nextTimerState);
             this.gameController.playRound();
 
-            dstPiece = this.chessBoardModel.chessBoardBoxes(dstFile, dstRank).button.UserData;
-            opponentColor = 'w'; if dstPiece.color == 'w'; opponentColor = 'b'; end
-
+            dstPiece = this.chessBoardModel.chessBoardBoxes(pm.dstFile, pm.dstRank).button.UserData;
+            opponentColor = this.oppositeColor(dstPiece.color);
             checkState = '';
             if this.gameController.isKingInCheck(opponentColor)
                 if ~this.gameController.hasAnyLegalMove(opponentColor)
@@ -336,32 +403,62 @@ classdef ChessBoardGUI < handle
                 else
                     checkState = 'check';
                 end
+            elseif ~this.gameController.hasAnyLegalMove(opponentColor)
+                checkState = 'stalemate';
             end
 
-            % Persist to disk in networked mode
             if ~isempty(this.netGame)
-                state = this.buildStateAfterMove(srcFile, srcRank, dstFile, dstRank, ...
-                    movedPiece, wasCapture, checkState, castleInfo, enPassantInfo, nextTimerState);
+                state = this.buildStateAfterMove(pm.srcFile, pm.srcRank, pm.dstFile, pm.dstRank, ...
+                    pm.movedPiece, pm.wasCapture, checkState, pm.castleInfo, pm.enPassantInfo, nextTimerState);
                 try
                     this.netGame.save(state);
                 catch err
-                    this.rollbackMove(srcFile, srcRank, dstFile, dstRank, ...
-                        movedPiece, dstPieceBefore, srcPictureBefore, dstPictureBefore, castleInfo, enPassantInfo, prevEnPassantInfo, srcPieceUsedBefore);
+                    this.restoreStateSnapshot(pm.prevStateSnapshot);
+                    this.pendingMove = [];
+                    this.repaintPremoveHighlights();
                     this.applyTimerStateToCurrentContext(prevTimerState);
                     this.resumeTimerIfNeeded();
                     this.gameController.setRound(this.gameController.round - 1);
+                    this.updateStatusBar();
+                    this.updateActionButtons();
                     errordlg(err.message, 'Network write failed', 'modal');
                     return;
                 end
             end
 
-            if strcmp(checkState, 'checkmate')
+            this.pendingMove = [];
+            this.repaintPremoveHighlights();
+            if strcmp(checkState, 'checkmate') || strcmp(checkState, 'stalemate')
                 this.notifyEnd();
             end
             if isempty(this.netGame)
                 this.startTimerForColorIfEnabled(this.gameController.whoPlays(), false);
             end
             this.updateStatusBar();
+            this.updateActionButtons();
+        end
+
+        function undoPendingMove(this)
+            if isempty(this.pendingMove)
+                this.updateActionButtons();
+                return;
+            end
+            pm = this.pendingMove;
+            this.pendingMove = [];
+            this.restoreStateSnapshot(pm.prevStateSnapshot);
+            this.repaintPremoveHighlights();
+            this.updateStatusBar();
+            this.updateActionButtons();
+        end
+
+        function tintPendingMove(this)
+            if isempty(this.pendingMove)
+                return;
+            end
+            this.clearPremoveHighlights();
+            pm = this.pendingMove;
+            this.pushSquareTint(pm.srcFile, pm.srcRank, this.COLOR_PENDING);
+            this.pushSquareTint(pm.dstFile, pm.dstRank, this.COLOR_PENDING);
         end
 
         function rollbackMove(this, srcFile, srcRank, dstFile, dstRank, ...
@@ -378,26 +475,46 @@ classdef ChessBoardGUI < handle
             if nargin < 13
                 srcPieceUsedBefore = false;
             end
-            movedPiece = movedPiece.movePiece([srcFile srcRank]);
+
             dstBtn = this.chessBoardModel.chessBoardBoxes(dstFile, dstRank).button;
             srcBtn = this.chessBoardModel.chessBoardBoxes(srcFile, srcRank).button;
+
+            movedPiece = movedPiece.movePiece([srcFile srcRank]);
+            movedPiece.used = srcPieceUsedBefore;
+
             if ~isempty(dstPieceBefore) && ~ischar(dstPieceBefore)
+                if isempty(dstPictureBefore)
+                    dstPictureBefore = this.getPieceImage(dstPieceBefore);
+                end
                 set(dstBtn, 'CData', dstPictureBefore, 'UserData', dstPieceBefore);
                 this.chessBoardModel.chessBoardMap(dstRank, dstFile) = dstPieceBefore.id;
             else
                 set(dstBtn, 'CData', [], 'UserData', '');
                 this.chessBoardModel.chessBoardMap(dstRank, dstFile) = 0;
-                movedPiece.used = srcPieceUsedBefore;
+            end
+
+            if isempty(srcPictureBefore)
+                srcPictureBefore = this.getPieceImage(movedPiece);
             end
             set(srcBtn, 'CData', srcPictureBefore, 'UserData', movedPiece);
+            this.chessBoardModel.chessBoardMap(srcRank, srcFile) = movedPiece.id;
+
             if enPassantInfo.isEnPassant
                 this.rollbackEnPassantCapture(enPassantInfo);
             end
             if castleInfo.isCastle
                 this.rollbackCastleRookMove(castleInfo);
             end
-            movedPiece.used = srcPieceUsedBefore;
             this.chessBoardModel.enPassantInfo = prevEnPassantInfo;
+        end
+
+        function img = getPieceImage(~, piece)
+            if isempty(piece) || ischar(piece)
+                img = [];
+                return;
+            end
+            player = upper(piece.color);
+            img = ChessBoardGUI.createRGB(['resources/' piece.id player '.png']);
         end
 
         function state = buildStateAfterMove(this, srcFile, srcRank, dstFile, dstRank, ...
@@ -606,11 +723,190 @@ classdef ChessBoardGUI < handle
                 'movedPawnColor', piece.color);
         end
 
+        function pushSquareTint(this, file, rank, color)
+            btn = this.chessBoardModel.chessBoardBoxes(file, rank).button;
+            snap = struct('file', file, 'rank', rank, ...
+                'bg', get(btn, 'BackgroundColor'), 'cdata', get(btn, 'CData'));
+            this.premoveHighlightSnapshot{end+1} = snap;
+            set(btn, 'BackgroundColor', color);
+        end
+
+        function clearPremoveHighlights(this)
+            for k = numel(this.premoveHighlightSnapshot):-1:1
+                s = this.premoveHighlightSnapshot{k};
+                btn = this.chessBoardModel.chessBoardBoxes(s.file, s.rank).button;
+                if ishandle(btn)
+                    set(btn, 'BackgroundColor', s.bg, 'CData', s.cdata);
+                end
+            end
+            this.premoveHighlightSnapshot = {};
+        end
+
+        function repaintPremoveHighlights(this)
+            this.clearPremoveHighlights();
+            if ~isempty(this.pendingMove)
+                this.tintPendingMove();
+                return;
+            end
+            if ~isempty(this.premoveEntry)
+                pe = this.premoveEntry;
+                if isfield(pe, 'oppFrom') && ~isempty(pe.oppFrom)
+                    this.pushSquareTint(pe.oppFrom(1), pe.oppFrom(2), this.COLOR_PREMOVE_ENTRY);
+                end
+                if isfield(pe, 'oppTo') && ~isempty(pe.oppTo)
+                    this.pushSquareTint(pe.oppTo(1), pe.oppTo(2), this.COLOR_PREMOVE_ENTRY);
+                end
+                if isfield(pe, 'myFrom') && ~isempty(pe.myFrom)
+                    this.pushSquareTint(pe.myFrom(1), pe.myFrom(2), this.COLOR_PREMOVE_ENTRY);
+                end
+                if isfield(pe, 'myTo') && ~isempty(pe.myTo)
+                    this.pushSquareTint(pe.myTo(1), pe.myTo(2), this.COLOR_PREMOVE_ENTRY);
+                end
+            end
+            for k = 1:numel(this.premoveQueue)
+                q = this.premoveQueue(k);
+                this.pushSquareTint(q.oppFrom(1), q.oppFrom(2), this.COLOR_PREMOVE_OPP);
+                this.pushSquareTint(q.oppTo(1), q.oppTo(2), this.COLOR_PREMOVE_OPP);
+                this.pushSquareTint(q.myFrom(1), q.myFrom(2), this.COLOR_PREMOVE_ME);
+                this.pushSquareTint(q.myTo(1), q.myTo(2), this.COLOR_PREMOVE_ME);
+            end
+        end
+
+        function onAddPremoveClicked(this)
+            if isempty(this.netGame) || this.netGame.isMyTurn() || ~isempty(this.pendingMove)
+                this.updateActionButtons();
+                return;
+            end
+            this.clearSelection();
+            this.premoveEntry = struct('step', 1, 'oppFrom', [], 'oppTo', [], 'myFrom', [], 'myTo', []);
+            this.repaintPremoveHighlights();
+            this.updateStatusBar();
+            this.updateActionButtons();
+        end
+
+        function onClearPremovesClicked(this)
+            this.premoveQueue = struct('oppFrom', {}, 'oppTo', {}, 'myFrom', {}, 'myTo', {});
+            this.premoveEntry = [];
+            this.repaintPremoveHighlights();
+            this.updateStatusBar();
+            this.updateActionButtons();
+        end
+
+        function onCancelPremoveClicked(this)
+            this.premoveEntry = [];
+            this.repaintPremoveHighlights();
+            this.updateStatusBar();
+            this.updateActionButtons();
+        end
+
+        function handlePremoveEntryClick(this, btn, file, rank)
+            piece = btn.UserData;
+            hasPiece = ~isempty(piece) && ~ischar(piece);
+            pe = this.premoveEntry;
+            if isempty(pe)
+                return;
+            end
+            switch pe.step
+                case 1
+                    if ~hasPiece || piece.color == this.netGame.myColor
+                        return;
+                    end
+                    pe.oppFrom = [file rank];
+                    pe.step = 2;
+                case 2
+                    pe.oppTo = [file rank];
+                    pe.step = 3;
+                case 3
+                    if ~hasPiece || piece.color ~= this.netGame.myColor
+                        return;
+                    end
+                    pe.myFrom = [file rank];
+                    pe.step = 4;
+                case 4
+                    pe.myTo = [file rank];
+                    this.premoveQueue(end+1) = rmfield(pe, 'step');
+                    this.premoveEntry = [];
+                    this.repaintPremoveHighlights();
+                    this.updateStatusBar();
+                    this.updateActionButtons();
+                    return;
+            end
+            this.premoveEntry = pe;
+            this.repaintPremoveHighlights();
+            this.updateStatusBar();
+            this.updateActionButtons();
+        end
+
+        function tryFirePremove(this, state)
+            if isempty(this.netGame) || isempty(this.premoveQueue) || isempty(state) || ~this.netGame.isMyTurn()
+                return;
+            end
+            if ~isfield(state, 'lastMove') || isempty(state.lastMove)
+                return;
+            end
+            q = this.premoveQueue(1);
+            lastMove = state.lastMove;
+            actualOppFrom = [lastMove.from(2) lastMove.from(1)];
+            actualOppTo = [lastMove.to(2) lastMove.to(1)];
+            if ~isequal(actualOppFrom, q.oppFrom) || ~isequal(actualOppTo, q.oppTo)
+                this.premoveQueue = struct('oppFrom', {}, 'oppTo', {}, 'myFrom', {}, 'myTo', {});
+                this.repaintPremoveHighlights();
+                return;
+            end
+            srcBtn = this.chessBoardModel.chessBoardBoxes(q.myFrom(1), q.myFrom(2)).button;
+            srcPiece = srcBtn.UserData;
+            if isempty(srcPiece) || ischar(srcPiece) || srcPiece.color ~= this.netGame.myColor
+                this.premoveQueue = struct('oppFrom', {}, 'oppTo', {}, 'myFrom', {}, 'myTo', {});
+                this.repaintPremoveHighlights();
+                return;
+            end
+            validMoves = srcPiece.ValidMoves();
+            isLegal = ~isempty(validMoves) && any(validMoves(:,1) == q.myTo(1) & validMoves(:,2) == q.myTo(2));
+            if ~isLegal
+                this.premoveQueue = struct('oppFrom', {}, 'oppTo', {}, 'myFrom', {}, 'myTo', {});
+                this.repaintPremoveHighlights();
+                return;
+            end
+            this.premoveQueue(1) = [];
+            this.repaintPremoveHighlights();
+            this.performMove(q.myFrom(1), q.myFrom(2), q.myTo(1), q.myTo(2));
+            if ~isempty(this.pendingMove)
+                this.commitPendingMove();
+            end
+        end
+
+        function updateActionButtons(this)
+            if isempty(this.figureHandle) || ~ishandle(this.figureHandle)
+                return;
+            end
+            hasPending = ~isempty(this.pendingMove);
+            enteringPre = ~isempty(this.premoveEntry);
+            canPremove = ~isempty(this.netGame) && ~this.netGame.isMyTurn() && strcmp(this.netGame.lastSeenState.status, 'active') && ~hasPending;
+            hasQueuedPre = ~isempty(this.premoveQueue);
+            set(this.endTurnButton, 'Visible', this.onOff(hasPending));
+            set(this.undoButton, 'Visible', this.onOff(hasPending));
+            set(this.premoveButton, 'Visible', this.onOff(canPremove && ~enteringPre));
+            set(this.clearPremovesButton, 'Visible', this.onOff(canPremove && hasQueuedPre && ~enteringPre));
+            set(this.cancelPremoveButton, 'Visible', this.onOff(enteringPre));
+            if hasPending
+                set(this.refreshButton, 'Enable', 'off');
+            else
+                set(this.refreshButton, 'Enable', this.refreshEnableFlag());
+            end
+        end
+
+        function out = onOff(~, tf)
+            out = 'off';
+            if tf
+                out = 'on';
+            end
+        end
+
         % ---------------------------------------------------------------
         % Networked refresh
         % ---------------------------------------------------------------
         function onRefreshClicked(this)
-            if isempty(this.netGame); return; end
+            if isempty(this.netGame) || ~isempty(this.pendingMove); return; end
             this.clearSelection();
             prevState = this.netGame.lastSeenState;
             try
@@ -620,6 +916,7 @@ classdef ChessBoardGUI < handle
                 return;
             end
             boardUpdated = isempty(prevState) || state.moveNumber ~= prevState.moveNumber;
+            this.clearPremoveHighlights();
             this.suppressInput = true;
             c = onCleanup(@() this.unsuppressInput());
             GameState.applyToModel(state, this.chessBoardModel, ...
@@ -629,7 +926,12 @@ classdef ChessBoardGUI < handle
                 this.flashLastMove(state);
             end
             this.syncClockAfterBoardLoad(prevState, state, boardUpdated);
+            if boardUpdated
+                this.tryFirePremove(state);
+            end
+            this.repaintPremoveHighlights();
             this.updateStatusBar();
+            this.updateActionButtons();
         end
 
 
@@ -641,6 +943,7 @@ classdef ChessBoardGUI < handle
             if ~timerState.enabled || ~isempty(timerState.expiredColor) || this.isGamePaused()
                 this.refreshTimerLabels();
                 this.updatePauseButton();
+                this.updateActionButtons();
                 return;
             end
 
@@ -681,6 +984,7 @@ classdef ChessBoardGUI < handle
                 this.refreshTimerLabels();
                 this.updatePauseButton();
             end
+            this.updateActionButtons();
         end
 
         function unsuppressInput(this)
@@ -691,6 +995,8 @@ classdef ChessBoardGUI < handle
             if nargin < 2 || isempty(state); return; end
             this.applyTimerStateToCurrentContext(state.timer);
             this.refreshTimerLabels();
+            this.repaintPremoveHighlights();
+            this.updateActionButtons();
         end
 
         function flashLastMove(this, state)
@@ -733,6 +1039,14 @@ classdef ChessBoardGUI < handle
                         msg = sprintf('You are %s  --  game paused by %s  (move %d)', myStr, whoPaused, s.moveNumber);
                     end
                 end
+            elseif ~isempty(this.pendingMove)
+                who = 'White'; if this.gameController.whoPlays() == 'b'; who = 'Black'; end
+                msg = sprintf('%s: move pending -- End Turn to send, Undo to take back', who);
+            elseif ~isempty(this.premoveEntry)
+                labels = {'click opponent''s piece', 'click opponent''s predicted destination', ...
+                    'click your piece', 'click your response'};
+                step = min(max(this.premoveEntry.step, 1), 4);
+                msg = sprintf('Premove %d/4: %s', step, labels{step});
             elseif isempty(this.netGame)
                 if this.gameController.whoPlays() == 'w'
                     msg = 'White to move';
@@ -747,6 +1061,9 @@ classdef ChessBoardGUI < handle
                 else
                     msg = sprintf('You are %s  --  waiting for opponent  (move %d, click Refresh)', ...
                         myStr, s.moveNumber);
+                    if ~isempty(this.premoveQueue)
+                        msg = sprintf('%s  |  %d premove(s) queued', msg, numel(this.premoveQueue));
+                    end
                 end
                 if ~strcmp(s.status, 'active')
                     msg = sprintf('%s  |  %s', msg, upper(s.status));
@@ -755,6 +1072,7 @@ classdef ChessBoardGUI < handle
             set(this.statusText, 'String', msg);
             this.refreshTimerLabels();
             this.updatePauseButton();
+            this.updateActionButtons();
         end
 
         function flag = refreshEnableFlag(this)
@@ -866,12 +1184,44 @@ classdef ChessBoardGUI < handle
         end
 
         function state = currentStateStruct(this)
-            if isempty(this.netGame)
-                state = struct('timer', this.currentTimerState(), 'status', 'active', ...
-                    'turn', this.gameController.whoPlays(), 'moveNumber', this.gameController.round);
-            else
-                state = this.netGame.lastSeenState;
+            state = GameState.fromModel(this.chessBoardModel);
+            state.timer = this.currentTimerState();
+            state.turn = this.gameController.whoPlays();
+            state.moveNumber = this.gameController.round;
+            state.status = 'active';
+            if ~isempty(this.netGame) && ~isempty(this.netGame.lastSeenState)
+                prev = this.netGame.lastSeenState;
+                for fld = {'schemaVersion','gameId','hostColor','createdAt','updatedAt', ...
+                           'halfmoveClock','lastMove','history','status'}
+                    f = fld{1};
+                    if isfield(prev, f)
+                        state.(f) = prev.(f);
+                    end
+                end
+                if isfield(prev, 'timer')
+                    state.timer = GameState.normalizeTimerState(prev.timer);
+                end
+                if isfield(prev, 'turn') && ~isempty(prev.turn)
+                    state.turn = prev.turn;
+                end
+                if isfield(prev, 'moveNumber') && ~isempty(prev.moveNumber)
+                    state.moveNumber = prev.moveNumber;
+                end
             end
+        end
+
+        function restoreStateSnapshot(this, state)
+            if nargin < 2 || isempty(state)
+                return;
+            end
+            this.clearSelection();
+            this.clearPremoveHighlights();
+            this.suppressInput = true;
+            c = onCleanup(@() this.unsuppressInput());
+            GameState.applyToModel(state, this.chessBoardModel, this.gameController, this);
+            clear c;
+            this.applyTimerStateToCurrentContext(state.timer);
+            this.refreshTimerLabels();
         end
 
         function timerState = currentTimerState(this)
@@ -937,6 +1287,7 @@ classdef ChessBoardGUI < handle
             if ~timerState.enabled
                 this.refreshTimerLabels();
                 this.updatePauseButton();
+                this.updateActionButtons();
                 return;
             end
             if this.isGamePaused()
@@ -984,6 +1335,7 @@ classdef ChessBoardGUI < handle
             if ~timerState.enabled || ~isempty(timerState.expiredColor)
                 this.refreshTimerLabels();
                 this.updatePauseButton();
+                this.updateActionButtons();
                 return;
             end
             timerState.running = true;
@@ -1126,10 +1478,24 @@ classdef ChessBoardGUI < handle
         end
 
         function notifyEnd(this)
-            if this.gameController.whoPlays() == 'w'
-                msg='black'; bg=[1 1 1]; fnt=[0 0 0];
+            status = 'checkmate';
+            try
+                s = this.currentStateStruct();
+                if isfield(s, 'status') && ~isempty(s.status)
+                    status = s.status;
+                end
+            catch
+            end
+            if strcmp(status, 'stalemate')
+                bg = [1 1 1]; fnt = [0 0 0];
+                headline = 'Draw by stalemate';
             else
-                msg='white'; bg=[0 0 0]; fnt=[1 1 1];
+                if this.gameController.whoPlays() == 'w'
+                    msg='black'; bg=[1 1 1]; fnt=[0 0 0];
+                else
+                    msg='white'; bg=[0 0 0]; fnt=[1 1 1];
+                end
+                headline = ['The ' msg ' player has won!'];
             end
             warn = dialog('Name','End','Position',[500 500 460 190], ...
                 'Resize','off','Color',bg);
@@ -1138,7 +1504,7 @@ classdef ChessBoardGUI < handle
             uicontrol(warn,'Style','pushbutton','String','New Game', ...
                 'Position',[120 20 90 36],'Enable','on', ...
                 'Callback',@(~,~) run('ChessMasters'));
-            uicontrol(warn,'Style','text','String',['The ' msg ' player has won!'], ...
+            uicontrol(warn,'Style','text','String',headline, ...
                 'FontSize',16,'HorizontalAlignment','center', ...
                 'Position',[25 95 410 50], ...
                 'BackgroundColor',bg,'ForegroundColor',fnt);
@@ -1168,15 +1534,16 @@ classdef ChessBoardGUI < handle
                 bg=[0 0 0]; fnt=[1 1 1];
             end
             warn = dialog('Name','Promotion','Position',[500 500 400 175], ...
-                'Resize','off','Color',bg);
+                'Resize','off','Color',bg, 'WindowStyle','modal');
             uicontrol(warn,'Style','popup', ...
                 'String',{'Rook','Bishop','Knight','Queen'}, 'FontSize',22, ...
                 'Position',[140 0 120 90], ...
-                'Callback',{@popup_callback, this, pawn});
+                'Callback',{@popup_callback, this, pawn, warn});
             uicontrol(warn,'Style','text','String','Promote your pawn to a different piece!', ...
                 'FontSize',22,'Position',[0 100 400 50], ...
                 'BackgroundColor',bg,'ForegroundColor',fnt);
-            function popup_callback(hObject, ~, this, movedPiece)
+            uiwait(warn);
+            function popup_callback(hObject, ~, this, movedPiece, dlg)
                 selectedIndex = get(hObject,'value');
                 player = upper(movedPiece.color);
                 boxes = this.chessBoardModel.chessBoardBoxes( ...
@@ -1191,7 +1558,8 @@ classdef ChessBoardGUI < handle
                 set(boxes.button, ...
                     'CData',    ChessBoardGUI.createRGB(['resources/' letter player '.png']), ...
                     'UserData', cls(this.chessBoardModel, movedPiece.color, movedPiece.position));
-                close;
+                uiresume(dlg);
+                delete(dlg);
             end
         end
     end
