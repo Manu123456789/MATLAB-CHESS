@@ -6,7 +6,7 @@ Install and compile the stockfish: https://github.com/official-stockfish/Stockfi
 For compiler:
 winget install MSYS2.MSYS2
 
-pacman -Scc
+pacman -Scc \n
 pacman -Syyu
 pacman -Syu
 pacman -S --needed base-devel mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-make
