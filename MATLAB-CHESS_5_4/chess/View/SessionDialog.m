@@ -63,8 +63,8 @@ classdef SessionDialog
                 'FontSize',12, 'BackgroundColor',[1 1 1], ...
                 'HorizontalAlignment','left', 'Position',[210 138 110 20]);
             timerMenu = uicontrol(d, 'Style','popupmenu', ...
-                'String',{'5 min','10 min','15 min','20 min','30 min','45 min','60 min','90 min'}, ...
-                'Value',2, ...
+                'String',{'1 min','3 min','5 min','10 min','15 min','20 min','30 min','45 min','60 min','90 min'}, ...
+                'Value',4, ...
                 'FontSize',11, 'Position',[325 135 135 25]);
             
             % Helper text
@@ -92,7 +92,7 @@ classdef SessionDialog
                 colorOpts       = {'w','b'};
                 choice.color    = colorOpts{colorMenu.Value};
                 choice.filePath = strtrim(pathEdit.String);
-                minutesList = [5 10 15 20 30 45 60 90];
+                minutesList = [1 3 5 10 15 20 30 45 60 90];
                 choice.timerMinutes = minutesList(timerMenu.Value);
                 choice.timerEnabled = logical(timerEnable.Value);
                 if strcmp(choice.mode, 'join')
