@@ -13,6 +13,8 @@ https://github.com/official-stockfish/Stockfish
 
 Do this for python path setup: $env:Path = "D:\Your\Path\To\python;D:\Your\Path\To\python\scripts;" + $env:Path
 
+After build, executable will be here: dist\ChessNet\ChessNet.exe as well as desktop
+
 
 ## Notes
 
