@@ -1,2 +1,0 @@
-# Extra tools needed only when building the standalone desktop executable.
-pyinstaller>=6.6,<7
